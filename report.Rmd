@@ -1,0 +1,293 @@
+---
+title: "IRT Calibration of PISA 2025 Science Trend Items: Wales and England"
+author: "Azlina Amir Kassim"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.align = "center")
+library(haven)
+library(dplyr)
+library(mirt)
+library(readxl)
+library(knitr)
+
+project <- "~/Desktop/GIF portfolio/PISA"
+```
+
+# Overview
+
+In PISA 2025, students in Wales scored below those in England, Scotland and Northern Ireland in science, reading and mathematics. This report calibrates the PISA 2025 science **trend items** (items carried over from earlier PISA cycles) for students in Wales and England using item response theory (IRT). 
+
+The report asks:
+
+1. How do the 80 science trend items perform for students in Wales and England?
+2. Is a Rasch model adequate, or do items differ in discrimination?
+3. How well does a calibration based on these two nations agree with the official PISA 2025 international item parameters?
+
+# Data
+
+## Source
+
+Data come from the PISA 2025 international database (OECD), using the cognitive item file for item responses and the student questionnaire file for weights and the official science scores. The data cannot be redistributed, so they are not included in this repository
+
+## Items
+
+There were 80 computer-based science trend items identified from the PISA 2025 codebook and confirmed against the item classification in Annex A of the PISA 2025 Technical Report. Of these, 76 are scored 0/1 and 4 are partial-credit items scored 0/1/2.
+
+## Sample and design
+
+PISA uses **matrix sampling**: each student answers only part of the item pool, and in 2025 most students took science through a **multi-stage adaptive** route, where later item sets depend on performance in earlier ones. About a quarter of students took a **linear** (non-adaptive) route.
+
+Students in Wales and England with at least one trend-item response were retained.
+
+## Missing data
+
+Missing codes were handled following the PISA 2025 Technical Report (chapter 13): items not administered by design (code 7), not reached (r) and affected by technical issues (t) were treated as missing. Omitted items within a test session are already scored 0 in the scored variables.
+
+```{r prep, eval = FALSE}
+# Data preparation (shown, not run: the source files are several GB)
+cog <- "CY09_MS_COG_20260806.sav"
+stu <- "CY09_MS_STU_PUF.sav"
+
+hdr   <- read_sav(cog, n_max = 0)
+trend <- grep("^CS[0-9]{3}Q[0-9]{2}S$|^DS[0-9]{3}Q[0-9]{2}C$",
+              names(hdr), value = TRUE)          # 80 trend items
+
+ids <- c("CNT", "CNTSCHID", "CNTSTUID", "REGION", "STRATUM", "LANGTEST_COG",
+         "BOOKID", "SPATH", "SCORE_ItemSet", "SS1_ItemSet", "SS1_LEV",
+         "SS2_ItemSet", "SS2_LEV")
+
+dat <- read_sav(cog, user_na = TRUE, col_select = c(all_of(ids), all_of(trend))) %>%
+  filter(CNT == "GBR") %>%
+  mutate(nation = as_factor(REGION)) %>%
+  filter(grepl("Wales|England", nation)) %>%
+  mutate(nation = factor(ifelse(grepl("Wales", nation), "Wales", "England"),
+                         levels = c("England", "Wales")))
+
+# 7 = not administered, r = not reached, t = technical issue -> missing
+dat[trend] <- lapply(dat[trend], function(x) {
+  x <- as.character(unclass(x))
+  x[x %in% c("7", "r", "t")] <- NA
+  as.integer(x)
+})
+
+# Keep students with at least one trend response
+dat <- dat %>% filter(rowSums(!is.na(dat[trend])) > 0)
+
+# Add weights and official science score from the student file
+stu_dat <- read_sav(stu, col_select = c(CNT, CNTSTUID, W_FSTUWT, PV1SCIE)) %>%
+  filter(CNT == "GBR") %>% select(-CNT)
+dat <- left_join(dat, stu_dat, by = "CNTSTUID")
+
+saveRDS(list(data = dat, items = trend),
+        "data/pisa25_trend_sci_wales_england.rds")
+```
+
+```{r load}
+prep  <- readRDS(file.path(project, "data", "pisa25_trend_sci_wales_england.rds"))
+dat   <- prep$data
+trend <- prep$items
+
+resp      <- as.data.frame(dat[trend])
+max_score <- sapply(resp, max, na.rm = TRUE)
+```
+
+The analysis sample contains **`r format(nrow(dat), big.mark = ",")` students** (England `r format(sum(dat$nation == "England"), big.mark = ",")`, Wales `r format(sum(dat$nation == "Wales"), big.mark = ",")`). Because of matrix sampling, `r round(100 * mean(is.na(as.matrix(resp))))`% of student-by-item cells are missing by design, and each student answered a median of `r median(rowSums(!is.na(resp)))` trend items. Every item was answered by at least `r min(colSums(!is.na(resp[dat$nation == "Wales", ])))` Welsh and `r min(colSums(!is.na(resp[dat$nation == "England", ])))` English students.
+
+Not-reached responses were rare: 0.7% of administered items in England and 1.2% in Wales.
+
+# Classical item statistics
+
+Item facility (mean score divided by maximum score) was calculated separately for students on the linear and adaptive routes. Under adaptive routing, harder items are seen mainly by stronger students, so raw facility can be biased.
+
+```{r facility}
+lin <- dat$SPATH == 1
+adp <- dat$SPATH == 2
+
+item_stats <- data.frame(
+  item              = trend,
+  facility_linear   = colMeans(resp[lin, ], na.rm = TRUE) / max_score,
+  facility_adaptive = colMeans(resp[adp, ], na.rm = TRUE) / max_score
+)
+
+route_test <- t.test(item_stats$facility_adaptive, item_stats$facility_linear,
+                     paired = TRUE)
+
+plot(item_stats$facility_linear, item_stats$facility_adaptive,
+     xlab = "Facility (linear route)", ylab = "Facility (adaptive route)",
+     main = "Item facility: linear vs adaptive route")
+abline(0, 1)
+```
+
+Facility on the two routes was strongly correlated (r = `r round(cor(item_stats$facility_linear, item_stats$facility_adaptive), 2)`), but items were on average `r round(-100 * route_test$estimate, 1)` percentage points harder on the adaptive route (paired t(`r route_test$parameter`) = `r round(route_test$statistic, 2)`, p < .001), with the largest differences among items of middling difficulty. Item difficulty was therefore estimated using IRT, which accounts for which items each student received.
+
+# IRT model comparison
+
+Two unidimensional models were fitted to all 80 items:
+
+- a **Rasch model**, with the partial credit model (PCM) for the four polytomous items, in which all items share the same discrimination;
+- a **2PL model**, with the generalised partial credit model (GPCM) for the polytomous items, in which each item has its own discrimination. This is the model used in PISA 2025 scaling.
+
+```{r models, cache = TRUE}
+mod_rasch <- mirt(resp, model = 1, itemtype = "Rasch", SE = TRUE, verbose = FALSE)
+
+itype   <- ifelse(max_score == 1, "2PL", "gpcm")
+mod_2pl <- mirt(resp, model = 1, itemtype = itype, SE = TRUE, verbose = FALSE)
+
+cmp <- anova(mod_rasch, mod_2pl)
+kable(round(cmp[, c("AIC", "BIC", "logLik", "X2", "df")], 2))
+```
+
+The 2PL/GPCM model fitted significantly better than the Rasch/PCM model, χ²(`r cmp$df[2]`) = `r round(cmp$X2[2], 2)`, p < .001, and was preferred on all information criteria. Items therefore differ meaningfully in discrimination, and the 2PL/GPCM model was retained.
+
+# Item parameters
+
+```{r pars}
+pars <- as.data.frame(coef(mod_2pl, IRTpars = TRUE, simplify = TRUE)$items)
+pars$item <- rownames(pars)
+
+kable(data.frame(
+  Parameter = c("Discrimination (a)", "Difficulty (b), 0/1 items"),
+  Min    = round(c(min(pars$a), min(pars$b, na.rm = TRUE)), 2),
+  Median = round(c(median(pars$a), median(pars$b, na.rm = TRUE)), 2),
+  Max    = round(c(max(pars$a), max(pars$b, na.rm = TRUE)), 2)
+))
+
+# Items with weak discrimination (a < 0.5)
+weak <- pars[pars$a < 0.5, c("item", "a", "b")]
+kable(weak, digits = 2, row.names = FALSE)
+```
+
+Discrimination was moderate to high for most items (median a = `r round(median(pars$a), 2)`). Difficulty ranged from `r round(min(pars$b, na.rm = TRUE), 2)` to `r round(max(pars$b, na.rm = TRUE), 2)` (median `r round(median(pars$b, na.rm = TRUE), 2)`), so the typical item was pitched close to the average student, with few very hard items. Two items had weak discrimination (a < 0.5): CS498Q02S and CS527Q03S.
+
+```{r icc}
+easiest  <- pars$item[which.min(pars$b)]
+sharpest <- pars$item[which.max(pars$a)]
+show     <- c(easiest, "CS498Q02S", "CS527Q03S", sharpest)
+
+plot(mod_2pl, type = "trace", which.items = match(show, trend),
+     facet_items = FALSE, main = "Item characteristic curves: selected items")
+```
+
+The item characteristic curves illustrate the range: `r easiest` is the easiest item, `r sharpest` discriminates most sharply, and CS498Q02S and CS527Q03S rise only gradually across the ability range, so they add little information about students' science ability.
+
+## Partial-credit items
+
+```{r pcm}
+pc_items <- trend[max_score == 2]
+
+plot(mod_2pl, type = "trace", which.items = match(pc_items, trend),
+     facet_items = TRUE, main = "Partial-credit items: response categories",
+     auto.key = list(text = c("Score 0", "Score 1 (partial)", "Score 2 (full)"),
+                     points = FALSE, lines = TRUE, space = "right"))
+```
+
+The partial-credit category functioned differently across the four items. For CS634Q02S, a partial-credit response was the most likely outcome for students slightly above average ability, as intended. For DS605Q04C and DS607Q03C, partial credit was used (peak probabilities of about .3 and .25) but was at most only marginally the most likely response at any ability level, so the middle category adds limited information. For DS498Q04C, a partial-credit response was never the most likely outcome (peak probability about .08), so the item behaves almost as if it were scored right or wrong.
+
+# Item fit
+
+Rasch infit and outfit mean squares were evaluated against a range of 0.7 to 1.3, commonly recommended for achievement tests (Wright & Linacre, 1994).
+
+```{r fit}
+fit_rasch <- itemfit(mod_rasch, fit_stats = "infit")
+misfit <- subset(fit_rasch, infit < 0.7 | infit > 1.3 | outfit < 0.7 | outfit > 1.3)
+kable(misfit[, c("item", "outfit", "infit")], digits = 2, row.names = FALSE)
+```
+
+No items showed underfit (mean squares above 1.3). `r nrow(misfit)` items showed overfit (mean squares below 0.7), meaning their responses were more predictable than the Rasch model expects. These include the most discriminating item, consistent with the items varying in discrimination and with the better fit of the 2PL/GPCM model. One item (CS610Q02S) was flagged on outfit only, with infit close to 1.
+
+# Student ability, reliability and validity
+
+```{r scores}
+sc <- fscores(mod_2pl, method = "EAP", full.scores.SE = TRUE)
+dat$theta <- sc[, "F1"]
+rel <- empirical_rxx(sc)
+r_pv <- cor(dat$theta, dat$PV1SCIE, use = "complete.obs")
+
+means <- dat %>%
+  group_by(nation) %>%
+  summarise(`Mean theta (weighted)`    = round(weighted.mean(theta, W_FSTUWT), 2),
+            `Mean PV1SCIE (weighted)` = round(weighted.mean(PV1SCIE, W_FSTUWT,
+                                                            na.rm = TRUE)))
+kable(means)
+```
+
+Empirical reliability of the EAP ability estimates was `r round(rel, 2)`. This is acceptable for group-level comparison and consistent with the matrix-sampled design, in which each student answered only around 10 trend items.
+
+Students' ability estimates correlated `r round(r_pv, 2)` with PISA's first science plausible value, indicating close agreement with the official scaling even though this calibration used only the trend items. Weighted means on the first plausible value (England `r means[[3]][1]`, Wales `r means[[3]][2]`) match the published PISA 2025 results. The gap is smaller on the theta scale, consistent with shrinkage of EAP estimates towards the mean.
+
+# Comparison with official PISA parameters
+
+```{r annex}
+annex_path <- list.files(file.path(project, "docs"), pattern = "^AnnexA",
+                         full.names = TRUE)
+annex <- read_excel(annex_path, sheet = "Table A.1", skip = 4, col_names = FALSE)
+annex <- annex[, c(1, 4, 19, 20)]
+names(annex) <- c("item_annex", "unit_type", "slope_official", "diff_official")
+annex <- annex %>%
+  filter(grepl("Trend", unit_type)) %>%
+  mutate(slope_official = as.numeric(slope_official),
+         diff_official  = as.numeric(diff_official))
+
+pars$item_annex <- sub("^DS", "CS", sub("[SC]$", "", pars$item))
+cmp01 <- inner_join(pars, annex, by = "item_annex") %>% filter(!is.na(b))
+
+plot(cmp01$diff_official, cmp01$b,
+     xlab = "Official PISA difficulty (Annex A)",
+     ylab = "Estimated difficulty (Wales + England)",
+     main = "Item difficulty: this calibration vs official PISA")
+abline(lm(b ~ diff_official, data = cmp01))
+```
+
+Item parameters agreed closely with the official PISA 2025 international parameters across the `r nrow(cmp01)` dichotomous items: r = `r round(cor(cmp01$b, cmp01$diff_official), 2)` for difficulty and r = `r round(cor(cmp01$a, cmp01$slope_official), 2)` for discrimination. Differences in scale are expected, because this calibration is centred on students in Wales and England while the official parameters are on the international PISA scale.
+
+# Test targeting
+
+```{r info}
+theta_grid <- seq(-6, 6, by = 0.01)
+info <- testinfo(mod_2pl, Theta = matrix(theta_grid))
+peak <- theta_grid[which.max(info)]
+
+plot(theta_grid, info, type = "l", xlab = "Theta", ylab = "Information",
+     main = "Test information, 80 trend items")
+
+hist(dat$theta[dat$nation == "England"], breaks = 40, freq = FALSE,
+     col = rgb(0, 0, 1, 0.4), xlim = c(-4, 4),
+     main = "Ability estimates by nation", xlab = "Theta (EAP)")
+hist(dat$theta[dat$nation == "Wales"], breaks = 40, freq = FALSE,
+     col = rgb(1, 0, 0, 0.4), add = TRUE)
+legend("topright", c("England", "Wales"),
+       fill = c(rgb(0, 0, 1, 0.4), rgb(1, 0, 0, 0.4)))
+```
+
+Test information for the 80 trend items peaked at θ = `r peak` (information = `r round(max(info), 1)`), slightly below the mean of the Welsh and English sample. The item pool was therefore well targeted to these students, with lower precision at the extremes of the ability distribution. Because each student answered only a subset of items, the precision of individual scores is lower than this curve implies for the full item set.
+
+# Conclusions
+
+1.  The 80 PISA 2025 science trend items performed well for students in Wales and England: most items discriminated well, no items showed underfit, and the item pool was well targeted to these students.
+2. Items differed in discrimination, so a 2PL/GPCM model fitted better than a Rasch model, in line with PISA's own scaling model.
+3. The calibration agreed closely with the official PISA 2025 parameters (r = .90 for difficulty) and with students' official science scores (r = .83).
+4. Two items discriminated weakly, and one partial-credit item made little use of its middle category.
+
+Next steps: These results provide the basis for the next stage of the project, i.e. a DIF analysis - testing whether any items function differently for Welsh and English students.
+
+# Limitations
+
+- Calibration was unweighted, so Welsh students, who are over-sampled in PISA, contribute more to the item parameters than their population share. Weighted estimates were used for population means.
+- Only the 80 trend items were analysed; the 119 new 2025 science items were not included.
+- EAP ability estimates are shrunk towards the mean and are less precise for individuals than PISA's plausible values, which are the appropriate basis for official group comparisons.
+- Some items are adaptive, so classical facility values are affected by routing and are reported descriptively only.
+
+# References
+
+OECD (2026). *PISA 2025 Technical Report*. OECD Publishing, Paris.
+
+Programme for International Student Assessment (PISA), Organisation for Economic Co-operation and Development (OECD), Paris. PISA 2025 international database.
+
+Wright, B. D., & Linacre, J. M. (1994). Reasonable mean-square fit values. *Rasch Measurement Transactions, 8*(3), 370.
